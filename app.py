@@ -89,7 +89,7 @@ def generate_veloxa_ai(user_text, history):
             router_instruction = "You are a search query optimizer. Look at the chat history and the user's latest message. Rewrite the user's message into a single, highly specific search string that includes any shoe names or context they are referring to. Output ONLY the rewritten string."
             
             router_response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-1.5-flash",
                 contents=f"HISTORY:\n{history_str}\nUSER: {user_text}",
                 config=types.GenerateContentConfig(system_instruction=router_instruction, temperature=0.1)
             )
@@ -126,7 +126,7 @@ def generate_veloxa_ai(user_text, history):
             prompt_text = f"CHAT HISTORY:\n{history_str}\nUSER: {user_text}\n\nRespond in strict JSON as instructed."
 
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-1.5-flash",
                 contents=prompt_text,
                 config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION, temperature=0.3)
             )
