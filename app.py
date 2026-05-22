@@ -29,7 +29,7 @@ st.markdown("""
 <div class="top-nav"><div class="nav-logo">VELOXA</div><div class="nav-links">MEN &nbsp;&nbsp;&nbsp;&nbsp; WOMEN &nbsp;&nbsp;&nbsp;&nbsp; RUNNING &nbsp;&nbsp;&nbsp;&nbsp; <span class="nav-sale">SALE</span></div></div>
 """, unsafe_allow_html=True)
 
-# --- 3. LOAD INVENTORY ---
+# --- 3. LOAD INVENTORY & POLICIES ---
 @st.cache_data
 def load_catalog():
     try:
@@ -46,15 +46,30 @@ store_policies = {
   "warranty": "1-year warranty against manufacturing defects."
 }
 
+# --- 4. SMART IMAGE RESOLVER ---
+def get_image_path(img_name):
+    if not img_name: return None
+    # Strip out the folder path so it just reads the pure filename
+    clean_name = img_name.replace("images/", "").replace("images\\", "")
+    # Check if the file is sitting directly in the cloud root
+    if os.path.exists(clean_name): return clean_name
+    # Check if it happens to be in a folder
+    if os.path.exists(f"images/{clean_name}"): return f"images/{clean_name}"
+    return None
+
 # ==========================================
-# 🛑 PASTE YOUR API KEYS ON THE LINES BELOW 🛑
+# 🛑 STREAMLIT SECRETS CONFIGURATION 🛑
 # ==========================================
-API_KEY = ""
-PINECONE_KEY = ""
+try:
+    API_KEY = st.secrets["API_KEY"]
+    PINECONE_KEY = st.secrets["PINECONE_KEY"]
+except:
+    API_KEY = ""
+    PINECONE_KEY = ""
 
 def generate_veloxa_ai(user_text, history):
-    if API_KEY == "YOUR_GEMINI_KEY_HERE" or PINECONE_KEY == "YOUR_PINECONE_KEY_HERE":
-        return {"trace_log": ["Error: API Keys Missing"], "reply": "⚠️ API Keys are missing in app.py.", "recommendations": []}
+    if not API_KEY or not PINECONE_KEY:
+        return {"trace_log": ["Error: API Keys Missing"], "reply": "⚠️ API Keys are missing in Streamlit Secrets.", "recommendations": []}
     
     try:
         client = genai.Client(api_key=API_KEY)
@@ -109,7 +124,7 @@ def generate_veloxa_ai(user_text, history):
     except Exception as e:
         return {"trace_log": [f"Cloud Connect Error: {str(e)}"], "reply": "Cloud DB Network Error.", "recommendations": []}
 
-# --- STATE INITIALIZATION & UI (Remains Identical) ---
+# --- STATE INITIALIZATION & UI ---
 if "messages" not in st.session_state: st.session_state.messages = [{"role": "assistant", "text": "Welcome to Veloxa. How may I assist you today?"}]
 if "recommendations" not in st.session_state: st.session_state.recommendations = [] 
 if "selected_shoe" not in st.session_state: st.session_state.selected_shoe = None
@@ -162,11 +177,16 @@ if catalog:
         rec_data = get_recommendation_data(shoe["id"])
         base_recommended_color = rec_data.get("recommended_color") if rec_data and rec_data.get("recommended_color") else shoe["colors_available"][0]
         display_color = st.session_state.selected_color if st.session_state.selected_color else base_recommended_color
+        
         with c1:
-            img_filename = next((item["image"] for item in shoe["inventory"] if item["color"] == display_color), None)
-            if img_filename and os.path.exists(img_filename): st.image(img_filename, use_container_width=True)
-            elif img_filename and os.path.exists(f"images/{img_filename}"): st.image(f"images/{img_filename}", use_container_width=True)
-            else: st.markdown(f"<div class='image-placeholder'>📸 Image File Missing:<br>{img_filename}</div>", unsafe_allow_html=True)
+            raw_img_filename = next((item["image"] for item in shoe["inventory"] if item["color"] == display_color), None)
+            valid_img_path = get_image_path(raw_img_filename)
+            
+            if valid_img_path: 
+                st.image(valid_img_path, use_container_width=True)
+            else: 
+                st.markdown(f"<div class='image-placeholder'>📸 Image File Missing:<br>{raw_img_filename}</div>", unsafe_allow_html=True)
+        
         with c2:
             st.subheader(shoe["model"])
             p_html = f"<span style='font-size:1.4rem;font-weight:bold;'>&#36;{shoe['finalPrice']}</span>"
@@ -206,10 +226,15 @@ if catalog:
                     if rec_data: badge += f'<span class="match-badge">{rec_data.get("match_percentage", 100)}% Match</span> '
                     if shoe["price"] != shoe["finalPrice"]: badge += '<span style="background:#ef4444;color:#fff;padding:4px 8px;border-radius:12px;font-size:10px;font-weight:bold;">SALE</span>'
                     if badge: st.markdown(f"<div style='margin-bottom:8px;'>{badge}</div>", unsafe_allow_html=True)
-                    img_filename = next((item["image"] for item in shoe["inventory"] if item["color"] == display_color), None)
-                    if img_filename and os.path.exists(img_filename): st.image(img_filename)
-                    elif img_filename and os.path.exists(f"images/{img_filename}"): st.image(f"images/{img_filename}")
-                    else: st.markdown(f"<div class='image-placeholder'>📸 {img_filename}</div>", unsafe_allow_html=True)
+                    
+                    raw_img_filename = next((item["image"] for item in shoe["inventory"] if item["color"] == display_color), None)
+                    valid_img_path = get_image_path(raw_img_filename)
+                    
+                    if valid_img_path: 
+                        st.image(valid_img_path)
+                    else: 
+                        st.markdown(f"<div class='image-placeholder'>📸 {raw_img_filename}</div>", unsafe_allow_html=True)
+                        
                     st.markdown(f"**{shoe['model']}**")
                     if rec_data: st.caption(f"✨ {rec_data.get('reason', '')}")
                     p_html = f"<span style='font-weight:bold;'>&#36;{shoe['finalPrice']}</span>"
