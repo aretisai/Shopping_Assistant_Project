@@ -1,4 +1,5 @@
 import streamlit as st
+import time
 from google import genai
 from google.genai import types
 from pinecone import Pinecone
@@ -76,11 +77,39 @@ def generate_veloxa_ai(user_text, history):
         pc = Pinecone(api_key=PINECONE_KEY)
         index = pc.Index("veloxa-inventory")
         
-        # STEP 1: Turn user query into Math (Embeddings)
-        query_emb = client.models.embed_content(model="gemini-embedding-001", contents=user_text)
+        # --- NEW: INTENT ROUTER (Cures RAG Amnesia) ---
+        # Grabs the last few messages to understand context
+        history_str = ""
+        for msg in history[-3:]: 
+            history_str += f"{msg['role'].upper()}: {msg['text']}\n"
+            
+        router_instruction = "You are a search query optimizer. Look at the chat history and the user's latest message. Rewrite the user's message into a single, highly specific search string that includes any shoe names or context they are referring to. Output ONLY the rewritten string."
         
-        # STEP 2: Semantic Search in Pinecone Vector DB
-        search_results = index.query(vector=query_emb.embeddings[0].values, top_k=4, include_metadata=True)
+        router_response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=f"HISTORY:\n{history_str}\nUSER: {user_text}",
+            config=types.GenerateContentConfig(system_instruction=router_instruction, temperature=0.1)
+        )
+        search_query = router_response.text.strip()
+
+        # --- NEW: RETRY LOOP (Cures Pinecone 503 Errors) ---
+        MAX_RETRIES = 3
+        search_results = None
+        
+        for attempt in range(MAX_RETRIES):
+            try:
+                # STEP 1: Turn Contextualized Query into Math
+                query_emb = client.models.embed_content(model="gemini-embedding-001", contents=search_query)
+                
+                # STEP 2: Semantic Search
+                search_results = index.query(vector=query_emb.embeddings[0].values, top_k=4, include_metadata=True)
+                break # Success! Exit the retry loop
+            except Exception as e:
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(1.5) # Sleep for 1.5s while Pinecone wakes up
+                else:
+                    raise e # Trigger the main exception block after 3 fails
+        
         matched_ids = [int(match['id']) for match in search_results['matches']]
         
         # STEP 3: Retrieve Live Stock Data ONLY for matched shoes
@@ -101,15 +130,14 @@ def generate_veloxa_ai(user_text, history):
         2. Formulate a multi-agent trace log showing Vector DB retrieval.
         3. Respond in STRICT JSON formatting matching this exact structure:
         {{
-            "trace_log": ["RAG Router: Embedding Query...", "Pinecone DB: Retrieved Top 4 Matches...", "Stylist: Analyzing Stock..."],
+            "trace_log": ["Router Rewrote Query: '{search_query}'", "Pinecone DB: Retrieved Top Matches", "Stylist: Analyzing Stock"],
             "reply": "Conversational reply based on retrieved context.",
             "recommendations": [{{"id": 1, "match_percentage": 95, "reason": "Why it fits.", "recommended_color": "Red"}}]
         }}
         """
         
-        prompt_text = "CHAT HISTORY:\n"
-        for msg in history: prompt_text += f"{msg['role'].upper()}: {msg['text']}\n"
-        prompt_text += f"\nUSER: {user_text}\n\nRespond in strict JSON as instructed."
+        # We pass the full history to the Concierge so it still sounds conversational
+        prompt_text = f"CHAT HISTORY:\n{history_str}\nUSER: {user_text}\n\nRespond in strict JSON as instructed."
 
         # STEP 5: Generate Final Answer
         response = client.models.generate_content(
@@ -122,7 +150,7 @@ def generate_veloxa_ai(user_text, history):
         return json.loads(raw_text)
             
     except Exception as e:
-        return {"trace_log": [f"Cloud Connect Error: {str(e)}"], "reply": "Cloud DB Network Error.", "recommendations": []}
+        return {"trace_log": [f"Cloud Connect Error: {str(e)}"], "reply": "Network timeout. Please try again in a moment.", "recommendations": []}
 
 # --- STATE INITIALIZATION & UI ---
 if "messages" not in st.session_state: st.session_state.messages = [{"role": "assistant", "text": "Welcome to Veloxa. How may I assist you today?"}]
