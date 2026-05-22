@@ -72,86 +72,81 @@ def generate_veloxa_ai(user_text, history):
     if not API_KEY or not PINECONE_KEY:
         return {"trace_log": ["Error: API Keys Missing"], "reply": "⚠️ API Keys are missing in Streamlit Secrets.", "recommendations": []}
     
-    try:
-        client = genai.Client(api_key=API_KEY)
-        pc = Pinecone(api_key=PINECONE_KEY)
-        index = pc.Index("veloxa-inventory")
-        
-        # --- NEW: INTENT ROUTER (Cures RAG Amnesia) ---
-        # Grabs the last few messages to understand context
-        history_str = ""
-        for msg in history[-3:]: 
-            history_str += f"{msg['role'].upper()}: {msg['text']}\n"
-            
-        router_instruction = "You are a search query optimizer. Look at the chat history and the user's latest message. Rewrite the user's message into a single, highly specific search string that includes any shoe names or context they are referring to. Output ONLY the rewritten string."
-        
-        router_response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=f"HISTORY:\n{history_str}\nUSER: {user_text}",
-            config=types.GenerateContentConfig(system_instruction=router_instruction, temperature=0.1)
-        )
-        search_query = router_response.text.strip()
-
-        # --- NEW: RETRY LOOP (Cures Pinecone 503 Errors) ---
-        MAX_RETRIES = 3
-        search_results = None
-        
-        for attempt in range(MAX_RETRIES):
-            try:
-                # STEP 1: Turn Contextualized Query into Math
-                query_emb = client.models.embed_content(model="gemini-embedding-001", contents=search_query)
+    client = genai.Client(api_key=API_KEY)
+    pc = Pinecone(api_key=PINECONE_KEY)
+    index = pc.Index("veloxa-inventory")
+    
+    # --- GLOBAL RETRY LOOP FOR ALL CLOUD SERVICES ---
+    MAX_RETRIES = 3
+    
+    for attempt in range(MAX_RETRIES):
+        try:
+            # 1. INTENT ROUTER (Gemini Call #1)
+            history_str = ""
+            for msg in history[-3:]: 
+                history_str += f"{msg['role'].upper()}: {msg['text']}\n"
                 
-                # STEP 2: Semantic Search
-                search_results = index.query(vector=query_emb.embeddings[0].values, top_k=4, include_metadata=True)
-                break # Success! Exit the retry loop
-            except Exception as e:
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(1.5) # Sleep for 1.5s while Pinecone wakes up
-                else:
-                    raise e # Trigger the main exception block after 3 fails
-        
-        matched_ids = [int(match['id']) for match in search_results['matches']]
-        
-        # STEP 3: Retrieve Live Stock Data ONLY for matched shoes
-        relevant_shoes = [shoe for shoe in catalog if shoe['id'] in matched_ids]
-
-        # STEP 4: Build dynamic RAG prompt
-        SYSTEM_INSTRUCTION = f"""
-        You are the VELOXA AI Concierge.
-        
-        RETRIEVED RELEVANT INVENTORY (Top Matches from Pinecone):
-        {json.dumps(relevant_shoes)}
-
-        STORE POLICIES:
-        {json.dumps(store_policies)}
-
-        YOUR DIRECTIVES:
-        1. Check nested "inventory" array. If "stock": 0, YOU CANNOT RECOMMEND IT. Suggest an alternative.
-        2. Formulate a multi-agent trace log showing Vector DB retrieval.
-        3. Respond in STRICT JSON formatting matching this exact structure:
-        {{
-            "trace_log": ["Router Rewrote Query: '{search_query}'", "Pinecone DB: Retrieved Top Matches", "Stylist: Analyzing Stock"],
-            "reply": "Conversational reply based on retrieved context.",
-            "recommendations": [{{"id": 1, "match_percentage": 95, "reason": "Why it fits.", "recommended_color": "Red"}}]
-        }}
-        """
-        
-        # We pass the full history to the Concierge so it still sounds conversational
-        prompt_text = f"CHAT HISTORY:\n{history_str}\nUSER: {user_text}\n\nRespond in strict JSON as instructed."
-
-        # STEP 5: Generate Final Answer
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt_text,
-            config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION, temperature=0.3)
-        )
-        
-        raw_text = response.text.strip().replace("```json", "").replace("```", "").strip()
-        return json.loads(raw_text)
+            router_instruction = "You are a search query optimizer. Look at the chat history and the user's latest message. Rewrite the user's message into a single, highly specific search string that includes any shoe names or context they are referring to. Output ONLY the rewritten string."
             
-    except Exception as e:
-        return {"trace_log": [f"Cloud Connect Error: {str(e)}"], "reply": "Network timeout. Please try again in a moment.", "recommendations": []}
+            router_response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=f"HISTORY:\n{history_str}\nUSER: {user_text}",
+                config=types.GenerateContentConfig(system_instruction=router_instruction, temperature=0.1)
+            )
+            search_query = router_response.text.strip()
 
+            # 2. VECTOR MATH & SEMANTIC SEARCH (Gemini Call #2 & Pinecone Call)
+            query_emb = client.models.embed_content(model="gemini-embedding-001", contents=search_query)
+            search_results = index.query(vector=query_emb.embeddings[0].values, top_k=4, include_metadata=True)
+            
+            matched_ids = [int(match['id']) for match in search_results['matches']]
+            relevant_shoes = [shoe for shoe in catalog if shoe['id'] in matched_ids]
+
+            # 3. RAG CONCIERGE (Gemini Call #3)
+            SYSTEM_INSTRUCTION = f"""
+            You are the VELOXA AI Concierge.
+            
+            RETRIEVED RELEVANT INVENTORY (Top Matches from Pinecone):
+            {json.dumps(relevant_shoes)}
+
+            STORE POLICIES:
+            {json.dumps(store_policies)}
+
+            YOUR DIRECTIVES:
+            1. Check nested "inventory" array. If "stock": 0, YOU CANNOT RECOMMEND IT. Suggest an alternative.
+            2. Formulate a multi-agent trace log showing Vector DB retrieval.
+            3. Respond in STRICT JSON formatting matching this exact structure:
+            {{
+                "trace_log": ["Router Rewrote Query: '{search_query}'", "Pinecone DB: Retrieved Matches", "Stylist: Analyzing Stock"],
+                "reply": "Conversational reply based on retrieved context.",
+                "recommendations": [{{"id": 1, "match_percentage": 95, "reason": "Why it fits.", "recommended_color": "Red"}}]
+            }}
+            """
+            
+            prompt_text = f"CHAT HISTORY:\n{history_str}\nUSER: {user_text}\n\nRespond in strict JSON as instructed."
+
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt_text,
+                config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION, temperature=0.3)
+            )
+            
+            raw_text = response.text.strip().replace("```json", "").replace("```", "").strip()
+            return json.loads(raw_text) # Success! Returns the data and exits the function.
+                
+        except Exception as e:
+            error_msg = str(e)
+            # If it is a traffic jam error, wait 2 seconds and loop again
+            if ("503" in error_msg or "UNAVAILABLE" in error_msg) and attempt < MAX_RETRIES - 1:
+                time.sleep(2)
+                continue 
+            
+            # If it fails 3 times, or is a different kind of error, fail gracefully
+            return {
+                "trace_log": [f"Cloud Connect Error: {error_msg}"], 
+                "reply": "Our cloud servers are experiencing unusually high traffic. Please try asking your question again in a moment.", 
+                "recommendations": []
+            }
 # --- STATE INITIALIZATION & UI ---
 if "messages" not in st.session_state: st.session_state.messages = [{"role": "assistant", "text": "Welcome to Veloxa. How may I assist you today?"}]
 if "recommendations" not in st.session_state: st.session_state.recommendations = [] 
