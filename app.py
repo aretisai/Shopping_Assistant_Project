@@ -44,7 +44,7 @@ store_policies = {
   "shipping": "Free standard shipping on orders over $150. Expedited shipping is $25.",
   "returns": "30-day trial period. Take them for a run!",
   "exchanges": "Free size and color exchanges within 30 days.",
-  "warranty": "1-year warranty against manufacturing defects. ACTION REQUIRED: Tell the customer to email clear photos of the defect and their Order ID to warranty@veloxa.com. State that our team will evaluate it within 24 hours and ship a free replacement pair immediately."
+  "warranty": "1-year warranty against manufacturing defects. ACTION REQUIRED: Tell the customer to email clear photos of the defect and their Order ID to warranty@veloxa.com. State that our team will evaluate the claim within 24 hours. CRITICAL GUARDRAIL: Do NOT promise or guarantee a replacement. Simply state that IF the claim is approved, a free replacement pair will be shipped."
 }
 
 # --- 4. SMART IMAGE RESOLVER ---
