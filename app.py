@@ -358,7 +358,7 @@ if catalog:
                         st.rerun()
                         
             if rec_data:
-                st.markdown(f"""<div class="reasoning-panel"><strong>ðŸ§  AI Match ({rec_data.get('match_percentage', 100)}%)</strong><br>{rec_data.get('reason', '')}<br><em>Recommended Color: {base_recommended_color}</em></div>""", unsafe_allow_html=True)
+                st.markdown(f"""<div class="reasoning-panel"><strong> AI Match ({rec_data.get('match_percentage', 100)}%)</strong><br>{rec_data.get('reason', '')}<br><em>Recommended Color: {base_recommended_color}</em></div>""", unsafe_allow_html=True)
             
             st.write("---")
             st.write(f"**Live Stock Matrix ({display_color}):**")
