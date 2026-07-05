@@ -324,7 +324,7 @@ if catalog:
     if st.session_state.selected_shoe:
         shoe = st.session_state.selected_shoe
         st.markdown("---")
-        if st.button("â† Back to Catalog"):
+        if st.button("Back to Catalog"):
             st.session_state.selected_shoe = None
             st.session_state.selected_color = None
             st.rerun()
@@ -347,12 +347,12 @@ if catalog:
             st.markdown(p_html, unsafe_allow_html=True)
             st.write("---")
             
-            st.write("**ðŸŽ¨ Select Color:**")
+            st.write("Select Color:**")
             color_cols = st.columns(len(shoe["colors_available"]))
             for idx, color_opt in enumerate(shoe["colors_available"]):
                 with color_cols[idx]:
                     is_active = (color_opt == display_color)
-                    btn_label = f"âœ… {color_opt}" if is_active else color_opt
+                    btn_label = f"{color_opt}" if is_active else color_opt
                     if st.button(btn_label, key=f"sel_{color_opt}", use_container_width=True):
                         st.session_state.selected_color = color_opt
                         st.rerun()
