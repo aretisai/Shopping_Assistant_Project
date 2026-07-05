@@ -7,23 +7,19 @@ from google import genai
 from google.genai import types
 from pinecone import Pinecone
 
-# --- PHASE 3: LANGFUSE OBSERVABILITY ---
-from langfuse.decorators import observe, langfuse_context
-from langfuse import Langfuse
-
 # ==========================================
 # 1. PAGE CONFIGURATION & STATE INIT
 # ==========================================
 st.set_page_config(page_title="VELOXA Storefront | Enterprise", page_icon="⚡", layout="wide")
 
-# Initialize Session States
+# Initialize Session States (including Phase 2 Cart & Trace)
 if "messages" not in st.session_state: st.session_state.messages = [{"role": "assistant", "text": "Welcome to Veloxa. How may I assist you today?"}]
 if "recommendations" not in st.session_state: st.session_state.recommendations = [] 
 if "selected_shoe" not in st.session_state: st.session_state.selected_shoe = None
 if "selected_color" not in st.session_state: st.session_state.selected_color = None
+if "latest_trace" not in st.session_state: st.session_state.latest_trace = []
 if "cart" not in st.session_state: st.session_state.cart = []
 if "admin_trace" not in st.session_state: st.session_state.admin_trace = ["System Initialized: Cloud Connected"]
-if "session_id" not in st.session_state: st.session_state.session_id = f"veloxa-session-{int(time.time())}"
 
 # ==========================================
 # 2. CUSTOM CSS & UI
@@ -45,23 +41,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 3. LOAD SECRETS & ENVIRONMENT VARS
+# 3. LOAD INVENTORY, POLICIES & SECRETS
 # ==========================================
-try:
-    API_KEY = st.secrets["API_KEY"]
-    PINECONE_KEY = st.secrets["PINECONE_KEY"]
-    
-    # Langfuse requires environment variables for the decorator to pick them up
-    os.environ["LANGFUSE_PUBLIC_KEY"] = st.secrets["LANGFUSE_PUBLIC_KEY"]
-    os.environ["LANGFUSE_SECRET_KEY"] = st.secrets["LANGFUSE_SECRET_KEY"]
-    os.environ["LANGFUSE_HOST"] = st.secrets.get("LANGFUSE_HOST", "https://cloud.langfuse.com")
-except Exception as e:
-    st.error("⚠️ API Keys are missing. Please check your st.secrets.")
-    API_KEY, PINECONE_KEY = "", ""
-
-# Initialize actual Langfuse client for manual flushing if needed
-langfuse_client = Langfuse()
-
 @st.cache_data
 def load_catalog():
     try:
@@ -72,11 +53,20 @@ def load_catalog():
 
 catalog = load_catalog()
 sizes = ["US 7", "US 8", "US 9", "US 10", "US 11", "US 12"]
+
 store_policies = {
   "shipping": "Free standard shipping on orders over $150. Expedited shipping is $25.",
   "returns": "30-day trial period. Take them for a run!",
-  "exchanges": "Free size and color exchanges within 30 days."
+  "exchanges": "Free size and color exchanges within 30 days.",
+  "warranty": "1-year warranty against manufacturing defects."
 }
+
+try:
+    API_KEY = st.secrets["API_KEY"]
+    PINECONE_KEY = st.secrets["PINECONE_KEY"]
+except:
+    API_KEY = ""
+    PINECONE_KEY = ""
 
 def get_image_path(img_name):
     """Smart Image Resolver"""
@@ -87,24 +77,24 @@ def get_image_path(img_name):
     return None
 
 def log_trace(msg: str):
-    """Local Glass-Box UI Telemetry"""
+    """Telemetry Tool for the Admin Glass-Box"""
     st.session_state.admin_trace.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
 # ==========================================
 # 4. PHASE 2: ENTERPRISE GOVERNANCE MODULES
 # ==========================================
-@observe(as_type="span", name="PII_Scrubber")
 def scrub_pii(text: str) -> str:
     """Security Gateway: Scrubber for PII before data hits the LLM."""
     log_trace("Security: Scrubbing PII...")
+    # Mask Credit Cards (simplistic 13-16 digit check)
     scrubbed = re.sub(r'\b(?:\d[ -]*?){13,16}\b', '[REDACTED_CC]', text)
+    # Mask Phones (simplistic US format check)
     scrubbed = re.sub(r'\b\d{3}[-.\s]??\d{3}[-.\s]??\d{4}\b', '[REDACTED_PHONE]', scrubbed)
     
     if scrubbed != text:
         log_trace("Security: PII detected and redacted.")
     return scrubbed
 
-@observe(as_type="span", name="Intent_Router")
 def check_hitl_escalation(text: str) -> bool:
     """Human-In-The-Loop (HITL) Router: Bypasses LLM for sensitive issues."""
     log_trace("Router: Evaluating intent for HITL escalation...")
@@ -117,7 +107,6 @@ def check_hitl_escalation(text: str) -> bool:
 # ==========================================
 # 5. PHASE 2: ACTION EXECUTION (TOOL CALLING)
 # ==========================================
-@observe(as_type="span", name="Tool_Execution")
 def add_to_cart(item_name: str, price: float) -> str:
     """Tool function to add an item to the shopping cart."""
     st.session_state.cart.append({"name": item_name, "price": price})
@@ -125,15 +114,20 @@ def add_to_cart(item_name: str, price: float) -> str:
     return f"Success: Added {item_name} to cart for ${price}."
 
 # ==========================================
-# 6. DYNAMIC ROUTING & MICRO-FUNCTIONS
+# 6. PHASE 2: DYNAMIC ROUTING & MICRO-FUNCTIONS
 # ==========================================
 def process_multimodal_input(uploaded_file) -> types.Part | None:
-    if uploaded_file is None: return None
+    """Formats an uploaded image for Gemini Vision processing."""
+    if uploaded_file is None:
+        return None
     log_trace("Vision: Processing multimodal image input...")
-    return types.Part.from_bytes(data=uploaded_file.getvalue(), mime_type=uploaded_file.type)
+    return types.Part.from_bytes(
+        data=uploaded_file.getvalue(), 
+        mime_type=uploaded_file.type
+    )
 
-@observe(as_type="span", name="Vector_Retrieval")
 def retrieve_pinecone_context(query: str, index: Pinecone, client: genai.Client) -> list:
+    """Handles Vector Math and DB Retrieval independently."""
     log_trace("RAG: Generating query embedding...")
     query_emb = client.models.embed_content(model="gemini-embedding-001", contents=query)
     
@@ -145,25 +139,31 @@ def retrieve_pinecone_context(query: str, index: Pinecone, client: genai.Client)
     log_trace(f"RAG: Retrieved {len(relevant_shoes)} relevant items.")
     return relevant_shoes
 
-@observe(name="Veloxa_Agent_Flow")
-def call_gemini_sales_agent(user_text: str, safe_text: str, image_part: types.Part | None, history: list) -> dict:
+def call_gemini_sales_agent(user_text: str, image_part: types.Part | None, history: list) -> dict:
     """Main Orchestrator tying the decoupled functions together."""
+    log_trace("Orchestrator: Initiating AI Request...")
     
-    # Update Langfuse Context dynamically with Session ID for UI tracking
-    langfuse_context.update_current_trace(
-        session_id=st.session_state.session_id,
-        user_id="enterprise-shopper",
-        tags=["production", "phase-2-omnichannel"]
-    )
-    
+    if not API_KEY or not PINECONE_KEY:
+        return {"trace_log": ["Error"], "reply": "⚠️ API Keys are missing.", "recommendations": []}
+        
     client = genai.Client(api_key=API_KEY)
     pc = Pinecone(api_key=PINECONE_KEY)
     index = pc.Index("veloxa-inventory")
 
-    # 1. RAG RETRIEVAL (Uses safe scrubbed text)
+    # 1. ENTERPRISE GATEWAY
+    safe_text = scrub_pii(user_text)
+    if check_hitl_escalation(safe_text):
+        return {
+            "trace_log": st.session_state.admin_trace[-3:],
+            "reply": "I am escalating your request to a specialized human agent.",
+            "recommendations": [],
+            "escalate": True
+        }
+
+    # 2. RAG RETRIEVAL
     relevant_shoes = retrieve_pinecone_context(safe_text, index, client)
 
-    # 2. PROMPT & HISTORY CONSTRUCTION
+    # 3. PROMPT & HISTORY CONSTRUCTION
     history_str = "\n".join([f"{msg['role'].upper()}: {msg['text']}" for msg in history[-3:]])
     system_instruction = f"""
     You are the VELOXA AI Concierge - an enterprise omnichannel shopping assistant.
@@ -171,7 +171,7 @@ def call_gemini_sales_agent(user_text: str, safe_text: str, image_part: types.Pa
     STORE POLICIES: {json.dumps(store_policies)}
 
     DIRECTIVES:
-    1. If the user provides an image, use Visual Search to find the closest match.
+    1. If the user provides an image, use Visual Search to find the closest match in the RETRIEVED INVENTORY.
     2. If the user asks to buy or add an item to their cart, trigger the `add_to_cart` tool.
     3. You must ONLY output strictly formatted JSON matching this exact structure:
     {{
@@ -179,13 +179,13 @@ def call_gemini_sales_agent(user_text: str, safe_text: str, image_part: types.Pa
         "reply": "Your conversational reply...",
         "recommendations": [{{"id": 1, "match_percentage": 95, "reason": "Why it fits.", "recommended_color": "Red"}}]
     }}
-    Do NOT wrap the response in markdown code blocks. Output raw JSON.
+    Do NOT wrap the response in markdown code blocks (e.g. ```json). Output raw JSON.
     """
 
     agent_config = types.GenerateContentConfig(
         system_instruction=system_instruction,
         temperature=0.3,
-        tools=[add_to_cart] 
+        tools=[add_to_cart] # Bind our Phase 2 tool
     )
 
     user_parts = []
@@ -193,7 +193,7 @@ def call_gemini_sales_agent(user_text: str, safe_text: str, image_part: types.Pa
     user_parts.append(types.Part.from_text(text=f"HISTORY:\n{history_str}\nUSER: {safe_text}"))
     contents = [types.Content(role="user", parts=user_parts)]
 
-    # 3. PRIMARY LLM CALL (Creates an inner span in Langfuse automatically)
+    # 4. PRIMARY LLM CALL (Supports Tool Discovery)
     log_trace("Orchestrator: Calling Gemini 2.5 Flash...")
     response = client.models.generate_content(
         model="gemini-2.5-flash",
@@ -201,14 +201,15 @@ def call_gemini_sales_agent(user_text: str, safe_text: str, image_part: types.Pa
         config=agent_config
     )
 
-    # 4. ACTION EXECUTION (TOOL CALLING)
+    # 5. ACTION EXECUTION & MULTI-TURN LOOP
     if response.function_calls:
         log_trace("Agent: Tool execution requested.")
-        contents.append(response.candidates[0].content) 
+        contents.append(response.candidates[0].content) # Append model's tool call request
         
         tool_responses = []
         for call in response.function_calls:
             if call.name == "add_to_cart":
+                # Execute the bound Python function
                 result = add_to_cart(call.args["item_name"], call.args["price"])
                 tool_responses.append(
                     types.Part.from_function_response(name="add_to_cart", response={"result": result})
@@ -223,7 +224,7 @@ def call_gemini_sales_agent(user_text: str, safe_text: str, image_part: types.Pa
             config=agent_config
         )
 
-    # 5. PARSING
+    # 6. JSON PARSING & FALLBACK
     try:
         raw_text = response.text.strip().replace("```json", "").replace("```", "").strip()
         data = json.loads(raw_text)
@@ -231,35 +232,37 @@ def call_gemini_sales_agent(user_text: str, safe_text: str, image_part: types.Pa
         return data
     except json.JSONDecodeError:
         log_trace("Error: Failed to parse JSON from LLM.")
-        return {"trace_log": ["JSON Parsing Error"], "reply": "I encountered an error structuring my response.", "recommendations": []}
+        return {
+            "trace_log": ["JSON Parsing Error"],
+            "reply": "I encountered an error structuring my response. Please try asking again.",
+            "recommendations": []
+        }
 
 def handle_user_request(prompt: str, uploaded_image):
-    """Wrapper to handle Gateway Logic & Execution."""
-    # Run the gateway checks BEFORE hitting the main observable trace
-    safe_text = scrub_pii(prompt)
-    if check_hitl_escalation(safe_text):
-        return {
-            "trace_log": st.session_state.admin_trace[-3:],
-            "reply": "I am escalating your request to a specialized human agent.",
-            "recommendations": [],
-            "escalate": True
-        }
-        
-    img_part = process_multimodal_input(uploaded_image)
-    
-    # Send both raw (for telemetry setup) and safe_text to orchestrator
-    result = call_gemini_sales_agent(prompt, safe_text, img_part, st.session_state.messages[:-1])
-    
-    # Flush langfuse telemetry to cloud asynchronously
-    langfuse_client.flush()
-    return result
+    """Wrapper to handle retries and execution."""
+    MAX_RETRIES = 3
+    for attempt in range(MAX_RETRIES):
+        try:
+            img_part = process_multimodal_input(uploaded_image)
+            return call_gemini_sales_agent(prompt, img_part, st.session_state.messages[:-1])
+        except Exception as e:
+            error_msg = str(e)
+            log_trace(f"Error caught: {error_msg}")
+            if ("503" in error_msg or "UNAVAILABLE" in error_msg) and attempt < MAX_RETRIES - 1:
+                time.sleep(2)
+                continue
+            return {
+                "trace_log": [f"Cloud Error: {error_msg}"], 
+                "reply": "Our cloud servers are experiencing high traffic. Please try again.", 
+                "recommendations": []
+            }
 
 # ==========================================
 # 7. SIDEBAR (CART & GLASS-BOX TRACEABILITY)
 # ==========================================
 with st.sidebar:
     st.title("⚡ Veloxa Concierge")
-    st.caption(f"Session: {st.session_state.session_id}")
+    st.caption("Phase 2 Enterprise Omnichannel Active")
     st.divider()
     
     # Cart UI
@@ -267,22 +270,22 @@ with st.sidebar:
     if not st.session_state.cart:
         st.write("Your cart is empty.")
     else:
-        cart_total = sum(float(item['price']) for item in st.session_state.cart)
+        cart_total = 0.0
         for item in st.session_state.cart:
             st.markdown(f"- {item['name']} **(${item['price']})**")
+            cart_total += float(item['price'])
         st.success(f"**Total: ${cart_total:.2f}**")
         if st.button("Secure Checkout", use_container_width=True):
             st.info("Redirecting to payment gateway...")
     
     st.divider()
     
-    # Glass-Box Local Telemetry
+    # Glass-Box Traceability Log for Stakeholders
     with st.expander("🛠️ Admin Trace Log (Gen-AI Ops)"):
         st.markdown("<div style='font-family: monospace; font-size: 0.8rem; line-height: 1.4;'>", unsafe_allow_html=True)
         for trace in st.session_state.admin_trace:
             st.markdown(f"> {trace}")
         st.markdown("</div>", unsafe_allow_html=True)
-        st.caption("🔒 Logs forwarded to Langfuse Cloud")
         
     st.divider()
 
@@ -290,8 +293,8 @@ with st.sidebar:
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]): st.markdown(msg["text"])
     
-    # Multimodal
-    uploaded_image = st.file_uploader("📸 Visual Search", type=['png', 'jpg', 'jpeg'])
+    # Multimodal Vision Input
+    uploaded_image = st.file_uploader("📸 Visual Search (Upload Image)", type=['png', 'jpg', 'jpeg'])
     
     if prompt := st.chat_input("Ask about sizing, colors, or add items to cart..."):
         st.session_state.messages.append({"role": "user", "text": prompt})
@@ -301,14 +304,18 @@ with st.sidebar:
             with st.spinner("Processing request..."):
                 res = handle_user_request(prompt, uploaded_image)
                 
+                # Render Reply
                 ai_text = res.get("reply", "Error communicating with the Concierge.")
                 st.markdown(ai_text)
                 
+                # Handle HITL Escalation Block
                 if res.get("escalate"):
                     st.warning("🚨 This requires human assistance.")
                     st.markdown("[Click here to email Support](mailto:support@veloxa.com)")
 
+                # State Updates
                 st.session_state.recommendations = res.get("recommendations", [])
+                st.session_state.latest_trace = res.get("trace_log", ["Trace unavailable."])
                 st.session_state.messages.append({"role": "assistant", "text": ai_text})
                 st.rerun()
 
