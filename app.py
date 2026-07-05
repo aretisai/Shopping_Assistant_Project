@@ -13,7 +13,7 @@ from langfuse import observe, get_client
 # ==========================================
 # 1. PAGE CONFIGURATION & STATE INIT
 # ==========================================
-st.set_page_config(page_title="VELOXA Storefront | Enterprise", page_icon="âš¡", layout="wide")
+st.set_page_config(page_title="VELOXA Storefront | Enterprise", page_icon="", layout="wide")
 
 # Initialize Session States
 if "messages" not in st.session_state: st.session_state.messages = [{"role": "assistant", "text": "Welcome to Veloxa. How may I assist you today?"}]
@@ -255,12 +255,12 @@ def handle_user_request(prompt: str, uploaded_image):
 # 7. SIDEBAR (CART & GLASS-BOX TRACEABILITY)
 # ==========================================
 with st.sidebar:
-    st.title("âš¡ Veloxa Concierge")
+    st.title("Veloxa Concierge")
     st.caption(f"Session: {st.session_state.session_id}")
     st.divider()
     
     # Cart UI
-    st.subheader("ðŸ›’ Shopping Cart")
+    st.subheader("Shopping Cart")
     if not st.session_state.cart:
         st.write("Your cart is empty.")
     else:
@@ -274,7 +274,7 @@ with st.sidebar:
     st.divider()
     
     # Glass-Box Local Telemetry
-    with st.expander("ðŸ› ï¸ Admin Trace Log (Gen-AI Ops)"):
+    with st.expander("Admin Trace Log (Gen-AI Ops)"):
         st.markdown("<div style='font-family: monospace; font-size: 0.8rem; line-height: 1.4;'>", unsafe_allow_html=True)
         for trace in st.session_state.admin_trace:
             st.markdown(f"> {trace}")
@@ -288,7 +288,7 @@ with st.sidebar:
         with st.chat_message(msg["role"]): st.markdown(msg["text"])
     
     # Multimodal
-    uploaded_image = st.file_uploader("ðŸ“¸ Visual Search", type=['png', 'jpg', 'jpeg'])
+    uploaded_image = st.file_uploader("Visual Search", type=['png', 'jpg', 'jpeg'])
     
     if prompt := st.chat_input("Ask about sizing, colors, or add items to cart..."):
         st.session_state.messages.append({"role": "user", "text": prompt})
@@ -302,7 +302,7 @@ with st.sidebar:
                 st.markdown(ai_text)
                 
                 if res.get("escalate"):
-                    st.warning("ðŸš¨ This requires human assistance.")
+                    st.warning("This requires human assistance.")
                     st.markdown("[Click here to email Support](mailto:support@veloxa.com)")
 
                 st.session_state.recommendations = res.get("recommendations", [])
