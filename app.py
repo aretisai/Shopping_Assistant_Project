@@ -7,9 +7,8 @@ from google import genai
 from google.genai import types
 from pinecone import Pinecone
 
-# --- PHASE 3: LANGFUSE OBSERVABILITY ---
-from langfuse.decorators import observe, langfuse_context
-from langfuse import Langfuse
+# --- PHASE 3: LANGFUSE OBSERVABILITY (SDK v3) ---
+from langfuse import observe, get_client
 
 # ==========================================
 # 1. PAGE CONFIGURATION & STATE INIT
@@ -58,9 +57,6 @@ try:
 except Exception as e:
     st.error("⚠️ API Keys are missing. Please check your st.secrets.")
     API_KEY, PINECONE_KEY = "", ""
-
-# Initialize actual Langfuse client for manual flushing if needed
-langfuse_client = Langfuse()
 
 @st.cache_data
 def load_catalog():
@@ -149,8 +145,9 @@ def retrieve_pinecone_context(query: str, index: Pinecone, client: genai.Client)
 def call_gemini_sales_agent(user_text: str, safe_text: str, image_part: types.Part | None, history: list) -> dict:
     """Main Orchestrator tying the decoupled functions together."""
     
-    # Update Langfuse Context dynamically with Session ID for UI tracking
-    langfuse_context.update_current_trace(
+    # Langfuse SDK v3 Context Update
+    langfuse = get_client()
+    langfuse.update_current_trace(
         session_id=st.session_state.session_id,
         user_id="enterprise-shopper",
         tags=["production", "phase-2-omnichannel"]
@@ -250,8 +247,8 @@ def handle_user_request(prompt: str, uploaded_image):
     # Send both raw (for telemetry setup) and safe_text to orchestrator
     result = call_gemini_sales_agent(prompt, safe_text, img_part, st.session_state.messages[:-1])
     
-    # Flush langfuse telemetry to cloud asynchronously
-    langfuse_client.flush()
+    # Flush langfuse telemetry to cloud asynchronously using v3 global client
+    get_client().flush()
     return result
 
 # ==========================================
@@ -282,7 +279,7 @@ with st.sidebar:
         for trace in st.session_state.admin_trace:
             st.markdown(f"> {trace}")
         st.markdown("</div>", unsafe_allow_html=True)
-        st.caption("🔒 Logs forwarded to Langfuse Cloud")
+        st.caption("🔒 Logs forwarded to Langfuse Cloud (v3)")
         
     st.divider()
 
