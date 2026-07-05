@@ -1,15 +1,29 @@
 import streamlit as st
 import time
+import json
+import os
+import re
 from google import genai
 from google.genai import types
 from pinecone import Pinecone
-import json
-import os
 
-# --- 1. PAGE CONFIGURATION ---
-st.set_page_config(page_title="VELOXA Storefront", page_icon="⚡", layout="wide")
+# ==========================================
+# 1. PAGE CONFIGURATION & STATE INIT
+# ==========================================
+st.set_page_config(page_title="VELOXA Storefront | Enterprise", page_icon="⚡", layout="wide")
 
-# --- 2. CUSTOM CSS & UI ---
+# Initialize Session States (including Phase 2 Cart & Trace)
+if "messages" not in st.session_state: st.session_state.messages = [{"role": "assistant", "text": "Welcome to Veloxa. How may I assist you today?"}]
+if "recommendations" not in st.session_state: st.session_state.recommendations = [] 
+if "selected_shoe" not in st.session_state: st.session_state.selected_shoe = None
+if "selected_color" not in st.session_state: st.session_state.selected_color = None
+if "latest_trace" not in st.session_state: st.session_state.latest_trace = []
+if "cart" not in st.session_state: st.session_state.cart = []
+if "admin_trace" not in st.session_state: st.session_state.admin_trace = ["System Initialized: Cloud Connected"]
+
+# ==========================================
+# 2. CUSTOM CSS & UI
+# ==========================================
 st.markdown("""
 <style>
     .top-nav { display: flex; justify-content: space-between; align-items: center; padding: 10px 0 20px 0; border-bottom: 1px solid #eaeaea; margin-bottom: 30px; }
@@ -19,10 +33,6 @@ st.markdown("""
     .hero-container { background: linear-gradient(135deg, #050505 0%, #1a1e26 100%); padding: 5rem 2rem; border-radius: 24px; color: white; text-align: center; margin-bottom: 2rem; box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
     .hero-title { font-size: 4rem; font-weight: 900; margin-bottom: 1.5rem; letter-spacing: -2px; line-height: 1.1; }
     .hero-subtitle { font-size: 1.2rem; opacity: 0.8; max-width: 600px; margin: 0 auto 2rem auto; line-height: 1.6; }
-    .terminal-container { background-color: #0f172a; border-radius: 12px; padding: 1.5rem; font-family: 'Courier New', Courier, monospace; color: #34d399; font-size: 0.85rem; margin-bottom: 3rem; border: 1px solid #1e293b; min-height: 120px; }
-    .terminal-header { color: #64748b; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; border-bottom: 1px solid #1e293b; padding-bottom: 5px; }
-    .terminal-line { margin: 5px 0; }
-    .terminal-prefix { color: #8b5cf6; font-weight: bold; }
     .reasoning-panel { background-color: #f8fafc; border-left: 4px solid #3b82f6; padding: 15px; border-radius: 0 8px 8px 0; margin-top: 15px; margin-bottom: 15px; color: #333; font-size: 0.9rem; }
     .match-badge { background: linear-gradient(90deg, #3b82f6, #8b5cf6); color: white; padding: 4px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: bold; display: inline-block; margin-bottom: 8px; }
     .image-placeholder { height: 200px; background-color: #f1f5f9; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: #94a3b8; font-size: 0.8rem; margin-bottom: 15px; text-align: center; padding: 20px;}
@@ -30,7 +40,9 @@ st.markdown("""
 <div class="top-nav"><div class="nav-logo">VELOXA</div><div class="nav-links">MEN &nbsp;&nbsp;&nbsp;&nbsp; WOMEN &nbsp;&nbsp;&nbsp;&nbsp; RUNNING &nbsp;&nbsp;&nbsp;&nbsp; <span class="nav-sale">SALE</span></div></div>
 """, unsafe_allow_html=True)
 
-# --- 3. LOAD INVENTORY & POLICIES ---
+# ==========================================
+# 3. LOAD INVENTORY, POLICIES & SECRETS
+# ==========================================
 @st.cache_data
 def load_catalog():
     try:
@@ -38,29 +50,17 @@ def load_catalog():
             return json.load(f).get("catalog", [])
     except FileNotFoundError:
         return []
+
 catalog = load_catalog()
+sizes = ["US 7", "US 8", "US 9", "US 10", "US 11", "US 12"]
 
 store_policies = {
   "shipping": "Free standard shipping on orders over $150. Expedited shipping is $25.",
   "returns": "30-day trial period. Take them for a run!",
   "exchanges": "Free size and color exchanges within 30 days.",
-  "warranty": "1-year warranty against manufacturing defects. ACTION REQUIRED: Tell the customer to email clear photos of the defect and their Order ID to warranty@veloxa.com. State that our team will evaluate the claim within 24 hours. CRITICAL GUARDRAIL: Do NOT promise or guarantee a replacement. Simply state that IF the claim is approved, a free replacement pair will be shipped."
+  "warranty": "1-year warranty against manufacturing defects."
 }
 
-# --- 4. SMART IMAGE RESOLVER ---
-def get_image_path(img_name):
-    if not img_name: return None
-    # Strip out the folder path so it just reads the pure filename
-    clean_name = img_name.replace("images/", "").replace("images\\", "")
-    # Check if the file is sitting directly in the cloud root
-    if os.path.exists(clean_name): return clean_name
-    # Check if it happens to be in a folder
-    if os.path.exists(f"images/{clean_name}"): return f"images/{clean_name}"
-    return None
-
-# ==========================================
-# 🛑 STREAMLIT SECRETS CONFIGURATION 🛑
-# ==========================================
 try:
     API_KEY = st.secrets["API_KEY"]
     PINECONE_KEY = st.secrets["PINECONE_KEY"]
@@ -68,127 +68,269 @@ except:
     API_KEY = ""
     PINECONE_KEY = ""
 
-def generate_veloxa_ai(user_text, history):
-    if not API_KEY or not PINECONE_KEY:
-        return {"trace_log": ["Error: API Keys Missing"], "reply": "⚠️ API Keys are missing in Streamlit Secrets.", "recommendations": []}
+def get_image_path(img_name):
+    """Smart Image Resolver"""
+    if not img_name: return None
+    clean_name = img_name.replace("images/", "").replace("images\\", "")
+    if os.path.exists(clean_name): return clean_name
+    if os.path.exists(f"images/{clean_name}"): return f"images/{clean_name}"
+    return None
+
+def log_trace(msg: str):
+    """Telemetry Tool for the Admin Glass-Box"""
+    st.session_state.admin_trace.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+# ==========================================
+# 4. PHASE 2: ENTERPRISE GOVERNANCE MODULES
+# ==========================================
+def scrub_pii(text: str) -> str:
+    """Security Gateway: Scrubber for PII before data hits the LLM."""
+    log_trace("Security: Scrubbing PII...")
+    # Mask Credit Cards (simplistic 13-16 digit check)
+    scrubbed = re.sub(r'\b(?:\d[ -]*?){13,16}\b', '[REDACTED_CC]', text)
+    # Mask Phones (simplistic US format check)
+    scrubbed = re.sub(r'\b\d{3}[-.\s]??\d{3}[-.\s]??\d{4}\b', '[REDACTED_PHONE]', scrubbed)
     
+    if scrubbed != text:
+        log_trace("Security: PII detected and redacted.")
+    return scrubbed
+
+def check_hitl_escalation(text: str) -> bool:
+    """Human-In-The-Loop (HITL) Router: Bypasses LLM for sensitive issues."""
+    log_trace("Router: Evaluating intent for HITL escalation...")
+    keywords = ["refund", "fraud", "lawsuit", "sue", "manager"]
+    if any(k in text.lower() for k in keywords):
+        log_trace("Router: High-risk keyword detected. Escalating to HITL.")
+        return True
+    return False
+
+# ==========================================
+# 5. PHASE 2: ACTION EXECUTION (TOOL CALLING)
+# ==========================================
+def add_to_cart(item_name: str, price: float) -> str:
+    """Tool function to add an item to the shopping cart."""
+    st.session_state.cart.append({"name": item_name, "price": price})
+    log_trace(f"Action Execution: add_to_cart('{item_name}', {price})")
+    return f"Success: Added {item_name} to cart for ${price}."
+
+# ==========================================
+# 6. PHASE 2: DYNAMIC ROUTING & MICRO-FUNCTIONS
+# ==========================================
+def process_multimodal_input(uploaded_file) -> types.Part | None:
+    """Formats an uploaded image for Gemini Vision processing."""
+    if uploaded_file is None:
+        return None
+    log_trace("Vision: Processing multimodal image input...")
+    return types.Part.from_bytes(
+        data=uploaded_file.getvalue(), 
+        mime_type=uploaded_file.type
+    )
+
+def retrieve_pinecone_context(query: str, index: Pinecone, client: genai.Client) -> list:
+    """Handles Vector Math and DB Retrieval independently."""
+    log_trace("RAG: Generating query embedding...")
+    query_emb = client.models.embed_content(model="gemini-embedding-001", contents=query)
+    
+    log_trace("RAG: Querying Pinecone Vector DB...")
+    search_results = index.query(vector=query_emb.embeddings[0].values, top_k=4, include_metadata=True)
+    
+    matched_ids = [int(match['id']) for match in search_results['matches']]
+    relevant_shoes = [shoe for shoe in catalog if shoe['id'] in matched_ids]
+    log_trace(f"RAG: Retrieved {len(relevant_shoes)} relevant items.")
+    return relevant_shoes
+
+def call_gemini_sales_agent(user_text: str, image_part: types.Part | None, history: list) -> dict:
+    """Main Orchestrator tying the decoupled functions together."""
+    log_trace("Orchestrator: Initiating AI Request...")
+    
+    if not API_KEY or not PINECONE_KEY:
+        return {"trace_log": ["Error"], "reply": "⚠️ API Keys are missing.", "recommendations": []}
+        
     client = genai.Client(api_key=API_KEY)
     pc = Pinecone(api_key=PINECONE_KEY)
     index = pc.Index("veloxa-inventory")
-    
-    # --- GLOBAL RETRY LOOP FOR ALL CLOUD SERVICES ---
+
+    # 1. ENTERPRISE GATEWAY
+    safe_text = scrub_pii(user_text)
+    if check_hitl_escalation(safe_text):
+        return {
+            "trace_log": st.session_state.admin_trace[-3:],
+            "reply": "I am escalating your request to a specialized human agent.",
+            "recommendations": [],
+            "escalate": True
+        }
+
+    # 2. RAG RETRIEVAL
+    relevant_shoes = retrieve_pinecone_context(safe_text, index, client)
+
+    # 3. PROMPT & HISTORY CONSTRUCTION
+    history_str = "\n".join([f"{msg['role'].upper()}: {msg['text']}" for msg in history[-3:]])
+    system_instruction = f"""
+    You are the VELOXA AI Concierge - an enterprise omnichannel shopping assistant.
+    RETRIEVED INVENTORY: {json.dumps(relevant_shoes)}
+    STORE POLICIES: {json.dumps(store_policies)}
+
+    DIRECTIVES:
+    1. If the user provides an image, use Visual Search to find the closest match in the RETRIEVED INVENTORY.
+    2. If the user asks to buy or add an item to their cart, trigger the `add_to_cart` tool.
+    3. You must ONLY output strictly formatted JSON matching this exact structure:
+    {{
+        "trace_log": ["Router Rewrote Query", "RAG Retrieved Matches", "Stylist Analyzing Stock"],
+        "reply": "Your conversational reply...",
+        "recommendations": [{{"id": 1, "match_percentage": 95, "reason": "Why it fits.", "recommended_color": "Red"}}]
+    }}
+    Do NOT wrap the response in markdown code blocks (e.g. ```json). Output raw JSON.
+    """
+
+    agent_config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        temperature=0.3,
+        tools=[add_to_cart] # Bind our Phase 2 tool
+    )
+
+    user_parts = []
+    if image_part: user_parts.append(image_part)
+    user_parts.append(types.Part.from_text(text=f"HISTORY:\n{history_str}\nUSER: {safe_text}"))
+    contents = [types.Content(role="user", parts=user_parts)]
+
+    # 4. PRIMARY LLM CALL (Supports Tool Discovery)
+    log_trace("Orchestrator: Calling Gemini 2.5 Flash...")
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=contents,
+        config=agent_config
+    )
+
+    # 5. ACTION EXECUTION & MULTI-TURN LOOP
+    if response.function_calls:
+        log_trace("Agent: Tool execution requested.")
+        contents.append(response.candidates[0].content) # Append model's tool call request
+        
+        tool_responses = []
+        for call in response.function_calls:
+            if call.name == "add_to_cart":
+                # Execute the bound Python function
+                result = add_to_cart(call.args["item_name"], call.args["price"])
+                tool_responses.append(
+                    types.Part.from_function_response(name="add_to_cart", response={"result": result})
+                )
+        
+        contents.append(types.Content(role="user", parts=tool_responses))
+        
+        log_trace("Orchestrator: Returning tool output to agent for final synthesis...")
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=contents,
+            config=agent_config
+        )
+
+    # 6. JSON PARSING & FALLBACK
+    try:
+        raw_text = response.text.strip().replace("```json", "").replace("```", "").strip()
+        data = json.loads(raw_text)
+        log_trace("Orchestrator: Successfully parsed JSON response.")
+        return data
+    except json.JSONDecodeError:
+        log_trace("Error: Failed to parse JSON from LLM.")
+        return {
+            "trace_log": ["JSON Parsing Error"],
+            "reply": "I encountered an error structuring my response. Please try asking again.",
+            "recommendations": []
+        }
+
+def handle_user_request(prompt: str, uploaded_image):
+    """Wrapper to handle retries and execution."""
     MAX_RETRIES = 3
-    
     for attempt in range(MAX_RETRIES):
         try:
-            # 1. INTENT ROUTER (Gemini Call #1)
-            history_str = ""
-            for msg in history[-3:]: 
-                history_str += f"{msg['role'].upper()}: {msg['text']}\n"
-                
-            router_instruction = "You are a search query optimizer. Look at the chat history and the user's latest message. Rewrite the user's message into a single, highly specific search string that includes any shoe names or context they are referring to. Output ONLY the rewritten string."
-            
-            router_response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=f"HISTORY:\n{history_str}\nUSER: {user_text}",
-                config=types.GenerateContentConfig(system_instruction=router_instruction, temperature=0.1)
-            )
-            search_query = router_response.text.strip()
-
-            # 2. VECTOR MATH & SEMANTIC SEARCH (Gemini Call #2 & Pinecone Call)
-            query_emb = client.models.embed_content(model="gemini-embedding-001", contents=search_query)
-            search_results = index.query(vector=query_emb.embeddings[0].values, top_k=4, include_metadata=True)
-            
-            matched_ids = [int(match['id']) for match in search_results['matches']]
-            relevant_shoes = [shoe for shoe in catalog if shoe['id'] in matched_ids]
-
-            # 3. RAG CONCIERGE (Gemini Call #3)
-            SYSTEM_INSTRUCTION = f"""
-            You are the VELOXA AI Concierge.
-            
-            RETRIEVED RELEVANT INVENTORY (Top Matches from Pinecone):
-            {json.dumps(relevant_shoes)}
-
-            STORE POLICIES:
-            {json.dumps(store_policies)}
-
-            YOUR DIRECTIVES:
-            1. Check nested "inventory" array. If "stock": 0, YOU CANNOT RECOMMEND IT. Suggest an alternative.
-            2. Formulate a multi-agent trace log showing Vector DB retrieval.
-            3. Respond in STRICT JSON formatting matching this exact structure:
-            {{
-                "trace_log": ["Router Rewrote Query: '{search_query}'", "Pinecone DB: Retrieved Matches", "Stylist: Analyzing Stock"],
-                "reply": "Conversational reply based on retrieved context.",
-                "recommendations": [{{"id": 1, "match_percentage": 95, "reason": "Why it fits.", "recommended_color": "Red"}}]
-            }}
-            """
-            
-            prompt_text = f"CHAT HISTORY:\n{history_str}\nUSER: {user_text}\n\nRespond in strict JSON as instructed."
-
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt_text,
-                config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION, temperature=0.3)
-            )
-            
-            raw_text = response.text.strip().replace("```json", "").replace("```", "").strip()
-            return json.loads(raw_text) # Success! Returns the data and exits the function.
-                
+            img_part = process_multimodal_input(uploaded_image)
+            return call_gemini_sales_agent(prompt, img_part, st.session_state.messages[:-1])
         except Exception as e:
             error_msg = str(e)
-            # If it is a traffic jam error, wait 2 seconds and loop again
+            log_trace(f"Error caught: {error_msg}")
             if ("503" in error_msg or "UNAVAILABLE" in error_msg) and attempt < MAX_RETRIES - 1:
                 time.sleep(2)
-                continue 
-            
-            # If it fails 3 times, or is a different kind of error, fail gracefully
+                continue
             return {
-                "trace_log": [f"Cloud Connect Error: {error_msg}"], 
-                "reply": "Our cloud servers are experiencing unusually high traffic. Please try asking your question again in a moment.", 
+                "trace_log": [f"Cloud Error: {error_msg}"], 
+                "reply": "Our cloud servers are experiencing high traffic. Please try again.", 
                 "recommendations": []
             }
-# --- STATE INITIALIZATION & UI ---
-if "messages" not in st.session_state: st.session_state.messages = [{"role": "assistant", "text": "Welcome to Veloxa. How may I assist you today?"}]
-if "recommendations" not in st.session_state: st.session_state.recommendations = [] 
-if "selected_shoe" not in st.session_state: st.session_state.selected_shoe = None
-if "selected_color" not in st.session_state: st.session_state.selected_color = None
-if "latest_trace" not in st.session_state: st.session_state.latest_trace = ["System Status: CLOUD CONNECTED", "Awaiting user input..."]
+
+# ==========================================
+# 7. SIDEBAR (CART & GLASS-BOX TRACEABILITY)
+# ==========================================
+with st.sidebar:
+    st.title("⚡ Veloxa Concierge")
+    st.caption("Phase 2 Enterprise Omnichannel Active")
+    st.divider()
+    
+    # Cart UI
+    st.subheader("🛒 Shopping Cart")
+    if not st.session_state.cart:
+        st.write("Your cart is empty.")
+    else:
+        cart_total = 0.0
+        for item in st.session_state.cart:
+            st.markdown(f"- {item['name']} **(${item['price']})**")
+            cart_total += float(item['price'])
+        st.success(f"**Total: ${cart_total:.2f}**")
+        if st.button("Secure Checkout", use_container_width=True):
+            st.info("Redirecting to payment gateway...")
+    
+    st.divider()
+    
+    # Glass-Box Traceability Log for Stakeholders
+    with st.expander("🛠️ Admin Trace Log (Gen-AI Ops)"):
+        st.markdown("<div style='font-family: monospace; font-size: 0.8rem; line-height: 1.4;'>", unsafe_allow_html=True)
+        for trace in st.session_state.admin_trace:
+            st.markdown(f"> {trace}")
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+    st.divider()
+
+    # Chat UI
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]): st.markdown(msg["text"])
+    
+    # Multimodal Vision Input
+    uploaded_image = st.file_uploader("📸 Visual Search (Upload Image)", type=['png', 'jpg', 'jpeg'])
+    
+    if prompt := st.chat_input("Ask about sizing, colors, or add items to cart..."):
+        st.session_state.messages.append({"role": "user", "text": prompt})
+        with st.chat_message("user"): st.markdown(prompt)
+        
+        with st.chat_message("assistant"):
+            with st.spinner("Processing request..."):
+                res = handle_user_request(prompt, uploaded_image)
+                
+                # Render Reply
+                ai_text = res.get("reply", "Error communicating with the Concierge.")
+                st.markdown(ai_text)
+                
+                # Handle HITL Escalation Block
+                if res.get("escalate"):
+                    st.warning("🚨 This requires human assistance.")
+                    st.markdown("[Click here to email Support](mailto:support@veloxa.com)")
+
+                # State Updates
+                st.session_state.recommendations = res.get("recommendations", [])
+                st.session_state.latest_trace = res.get("trace_log", ["Trace unavailable."])
+                st.session_state.messages.append({"role": "assistant", "text": ai_text})
+                st.rerun()
+
+# ==========================================
+# 8. MAIN VIEW (HERO & CATALOG UI)
+# ==========================================
+st.markdown("""<div class="hero-container"><div class="hero-title">Defy Gravity.<br>Embrace Speed.</div><div class="hero-subtitle">Powered by Enterprise Visual Search & Agentic Tools.</div></div>""", unsafe_allow_html=True)
 
 def get_recommendation_data(shoe_id):
     for rec in st.session_state.recommendations:
         if rec.get("id") == shoe_id: return rec
     return None
 
-with st.sidebar:
-    st.title("⚡ Veloxa Concierge")
-    st.caption("Cloud RAG Architecture Active")
-    st.divider()
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]): st.markdown(msg["text"])
-    if prompt := st.chat_input("Ask about sizing, colors, or performance..."):
-        st.session_state.messages.append({"role": "user", "text": prompt})
-        with st.chat_message("user"): st.markdown(prompt)
-        with st.chat_message("assistant"):
-            with st.spinner("Querying Pinecone DB..."):
-                res = generate_veloxa_ai(prompt, st.session_state.messages[:-1])
-                ai_text = res.get("reply", "Error communicating with the Concierge.")
-                st.markdown(ai_text)
-                st.session_state.recommendations = res.get("recommendations", [])
-                st.session_state.latest_trace = res.get("trace_log", ["Trace unavailable."])
-        st.session_state.messages.append({"role": "assistant", "text": ai_text})
-        st.rerun()
-
-st.markdown("""<div class="hero-container"><div class="hero-title">Defy Gravity.<br>Embrace Speed.</div><div class="hero-subtitle">Powered by Cloud Vector Search.</div></div>""", unsafe_allow_html=True)
-
-terminal_placeholder = st.empty()
-trace_html = "<div class='terminal-container'><div class='terminal-header'>🔴 CLOUD TRACE LOG</div>"
-for line in st.session_state.latest_trace: trace_html += f"<div class='terminal-line'><span class='terminal-prefix'>&gt;</span> {line}</div>"
-trace_html += "</div>"
-terminal_placeholder.markdown(trace_html, unsafe_allow_html=True)
-
-sizes = ["US 7", "US 8", "US 9", "US 10", "US 11", "US 12"]
-
 if catalog:
+    # Detailed Shoe View
     if st.session_state.selected_shoe:
         shoe = st.session_state.selected_shoe
         st.markdown("---")
@@ -196,6 +338,7 @@ if catalog:
             st.session_state.selected_shoe = None
             st.session_state.selected_color = None
             st.rerun()
+            
         c1, c2 = st.columns([1, 2])
         rec_data = get_recommendation_data(shoe["id"])
         base_recommended_color = rec_data.get("recommended_color") if rec_data and rec_data.get("recommended_color") else shoe["colors_available"][0]
@@ -204,11 +347,8 @@ if catalog:
         with c1:
             raw_img_filename = next((item["image"] for item in shoe["inventory"] if item["color"] == display_color), None)
             valid_img_path = get_image_path(raw_img_filename)
-            
-            if valid_img_path: 
-                st.image(valid_img_path, use_container_width=True)
-            else: 
-                st.markdown(f"<div class='image-placeholder'>📸 Image File Missing:<br>{raw_img_filename}</div>", unsafe_allow_html=True)
+            if valid_img_path: st.image(valid_img_path, use_container_width=True)
+            else: st.markdown(f"<div class='image-placeholder'>📸 Image Missing:<br>{raw_img_filename}</div>", unsafe_allow_html=True)
         
         with c2:
             st.subheader(shoe["model"])
@@ -216,6 +356,7 @@ if catalog:
             if shoe['price'] != shoe['finalPrice']: p_html += f" <span style='text-decoration:line-through;color:#888;margin-left:10px;'>&#36;{shoe['price']}</span>"
             st.markdown(p_html, unsafe_allow_html=True)
             st.write("---")
+            
             st.write("**🎨 Select Color:**")
             color_cols = st.columns(len(shoe["colors_available"]))
             for idx, color_opt in enumerate(shoe["colors_available"]):
@@ -225,8 +366,10 @@ if catalog:
                     if st.button(btn_label, key=f"sel_{color_opt}", use_container_width=True):
                         st.session_state.selected_color = color_opt
                         st.rerun()
+                        
             if rec_data:
-                st.markdown(f"""<div class="reasoning-panel"><strong>🧠 Cloud Search Match ({rec_data.get('match_percentage', 100)}%)</strong><br>{rec_data.get('reason', '')}<br><em>Recommended Color: {base_recommended_color}</em></div>""", unsafe_allow_html=True)
+                st.markdown(f"""<div class="reasoning-panel"><strong>🧠 AI Match ({rec_data.get('match_percentage', 100)}%)</strong><br>{rec_data.get('reason', '')}<br><em>Recommended Color: {base_recommended_color}</em></div>""", unsafe_allow_html=True)
+            
             st.write("---")
             st.write(f"**Live Stock Matrix ({display_color}):**")
             stock_cols = st.columns(len(sizes))
@@ -237,6 +380,8 @@ if catalog:
                 with stock_cols[idx]:
                     if stock_qty > 0: st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid #e2e8f0; border-radius:8px; margin-bottom: 10px;'><div>{size}</div><div style='color:#10b981; font-weight:bold; font-size:12px;'>{stock_qty} in stock</div></div>", unsafe_allow_html=True)
                     else: st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid #fee2e2; border-radius:8px; background:#fff5f5; margin-bottom: 10px;'><div>{size}</div><div style='color:#ef4444; font-weight:bold; font-size:12px;'>Out of Stock</div></div>", unsafe_allow_html=True)
+
+    # Grid Catalog View
     else:
         display_catalog = sorted(catalog, key=lambda x: 0 if get_recommendation_data(x["id"]) else 1)
         cols = st.columns(3)
@@ -245,6 +390,7 @@ if catalog:
                 with st.container(border=True):
                     rec_data = get_recommendation_data(shoe["id"])
                     display_color = rec_data.get("recommended_color") if rec_data and rec_data.get("recommended_color") else shoe["colors_available"][0]
+                    
                     badge = ""
                     if rec_data: badge += f'<span class="match-badge">{rec_data.get("match_percentage", 100)}% Match</span> '
                     if shoe["price"] != shoe["finalPrice"]: badge += '<span style="background:#ef4444;color:#fff;padding:4px 8px;border-radius:12px;font-size:10px;font-weight:bold;">SALE</span>'
@@ -252,18 +398,17 @@ if catalog:
                     
                     raw_img_filename = next((item["image"] for item in shoe["inventory"] if item["color"] == display_color), None)
                     valid_img_path = get_image_path(raw_img_filename)
-                    
-                    if valid_img_path: 
-                        st.image(valid_img_path)
-                    else: 
-                        st.markdown(f"<div class='image-placeholder'>📸 {raw_img_filename}</div>", unsafe_allow_html=True)
+                    if valid_img_path: st.image(valid_img_path)
+                    else: st.markdown(f"<div class='image-placeholder'>📸 {raw_img_filename}</div>", unsafe_allow_html=True)
                         
                     st.markdown(f"**{shoe['model']}**")
                     if rec_data: st.caption(f"✨ {rec_data.get('reason', '')}")
+                    
                     p_html = f"<span style='font-weight:bold;'>&#36;{shoe['finalPrice']}</span>"
                     if shoe["price"] != shoe["finalPrice"]: p_html += f" <span style='text-decoration:line-through;color:#888;font-size:0.8rem;margin-left:8px;'>&#36;{shoe['price']}</span>"
                     st.markdown(p_html, unsafe_allow_html=True)
-                    if st.button("View Details & Stock", key=f"v_{shoe['id']}", use_container_width=True):
+                    
+                    if st.button("View Details", key=f"v_{shoe['id']}", use_container_width=True):
                         st.session_state.selected_shoe = shoe
                         st.session_state.selected_color = None
                         st.rerun()
